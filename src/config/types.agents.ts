@@ -8,6 +8,7 @@ import type {
   SandboxPruneSettings,
 } from "./types.sandbox.js";
 import type { AgentToolsConfig, MemorySearchConfig } from "./types.tools.js";
+import type { AgentHierarchyConfig, TeamsConfig } from "./types.teams.js";
 
 export type AgentModelConfig =
   | string
@@ -63,12 +64,20 @@ export type AgentConfig = {
     prune?: SandboxPruneSettings;
   };
   tools?: AgentToolsConfig;
+  /** This agent's tier in the company hierarchy. */
+  tier?: AgentHierarchyConfig["tier"];
+  /** The agent ID this agent reports to. */
+  reportsTo?: string;
+  /** Agent teams configuration for managers. */
+  agentTeams?: AgentHierarchyConfig["agentTeams"];
 };
 
 export type AgentsConfig = {
   defaults?: AgentDefaultsConfig;
   list?: AgentConfig[];
 };
+
+export type { TeamsConfig } from "./types.teams.js";
 
 export type AgentBinding = {
   agentId: string;

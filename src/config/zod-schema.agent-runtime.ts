@@ -471,6 +471,17 @@ export const AgentEntrySchema = z
       .optional(),
     sandbox: AgentSandboxSchema,
     tools: AgentToolsSchema,
+    tier: z
+      .enum(["general-manager", "operations", "manager", "team-lead", "teammate"])
+      .optional(),
+    reportsTo: z.string().optional(),
+    agentTeams: z
+      .object({
+        enabled: z.boolean().optional(),
+        templates: z.array(z.string()).optional(),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 

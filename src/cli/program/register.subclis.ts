@@ -239,6 +239,14 @@ const entries: SubCliEntry[] = [
       mod.registerCompletionCli(program);
     },
   },
+  {
+    name: "teams",
+    description: "Manage agent team templates and projects",
+    register: async (program) => {
+      const mod = await import("../teams-cli.js");
+      mod.registerTeamsCli(program);
+    },
+  },
 ];
 
 export function getSubCliEntries(): SubCliEntry[] {

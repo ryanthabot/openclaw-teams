@@ -9,6 +9,7 @@ import {
 } from "../plugins/config-state.js";
 import { loadPluginManifestRegistry } from "../plugins/manifest-registry.js";
 import { validateJsonSchemaValue } from "../plugins/schema-validator.js";
+import { normalizeAgentId } from "../routing/session-key.js";
 import { findDuplicateAgentDirs, formatDuplicateAgentDirError } from "./agent-dirs.js";
 import { applyAgentDefaults, applyModelDefaults, applySessionDefaults } from "./defaults.js";
 import { findLegacyConfigIssues } from "./legacy.js";
@@ -121,12 +122,130 @@ export function validateConfigObject(
   if (avatarIssues.length > 0) {
     return { ok: false, issues: avatarIssues };
   }
+  const teamIssues = validateTeamHierarchy(validated.data as OpenClawConfig);
+  if (teamIssues.length > 0) {
+    return { ok: false, issues: teamIssues };
+  }
   return {
     ok: true,
     config: applyModelDefaults(
       applyAgentDefaults(applySessionDefaults(validated.data as OpenClawConfig)),
     ),
   };
+}
+
+const TIER_HIERARCHY: Record<string, string[]> = {
+  "general-manager": ["operations", "manager"],
+  manager: ["team-lead"],
+  "team-lead": ["teammate"],
+};
+
+function validateTeamHierarchy(config: OpenClawConfig): ConfigValidationIssue[] {
+  const agents = config.agents?.list;
+  if (!Array.isArray(agents) || agents.length === 0) {
+    return [];
+  }
+  const issues: ConfigValidationIssue[] = [];
+  const agentIds = new Set(agents.map((a) => normalizeAgentId(a.id)));
+
+  for (const [index, entry] of agents.entries()) {
+    if (!entry || typeof entry !== "object") {
+      continue;
+    }
+    const raw = entry as Record<string, unknown>;
+    const reportsTo = typeof raw.reportsTo === "string" ? raw.reportsTo.trim() : undefined;
+    const tier = typeof raw.tier === "string" ? raw.tier : undefined;
+
+    // Validate reportsTo references an existing agent
+    if (reportsTo) {
+      const normalizedParent = normalizeAgentId(reportsTo);
+      if (!agentIds.has(normalizedParent)) {
+        issues.push({
+          path: `agents.list.${index}.reportsTo`,
+          message: `reportsTo references unknown agent "${reportsTo}".`,
+        });
+      }
+      // Check for self-reference
+      if (normalizedParent === normalizeAgentId(entry.id)) {
+        issues.push({
+          path: `agents.list.${index}.reportsTo`,
+          message: `agent "${entry.id}" cannot report to itself.`,
+        });
+      }
+    }
+
+    // Validate tier-consistency: if both this agent and parent have tiers, parent should be higher
+    if (reportsTo && tier) {
+      const parentEntry = agents.find(
+        (a) => normalizeAgentId(a.id) === normalizeAgentId(reportsTo),
+      );
+      const parentTier = parentEntry
+        ? (parentEntry as Record<string, unknown>).tier
+        : undefined;
+      if (typeof parentTier === "string") {
+        const allowedChildren = TIER_HIERARCHY[parentTier];
+        if (allowedChildren && !allowedChildren.includes(tier)) {
+          issues.push({
+            path: `agents.list.${index}.tier`,
+            message: `tier "${tier}" cannot report to tier "${parentTier}" (allowed children: ${allowedChildren.join(", ")}).`,
+          });
+        }
+      }
+    }
+
+    // Validate agentTeams template references
+    const agentTeams = raw.agentTeams as
+      | { enabled?: boolean; templates?: string[] }
+      | undefined;
+    if (agentTeams?.templates && Array.isArray(agentTeams.templates)) {
+      const templates = (config as Record<string, unknown>).teams as
+        | { templates?: Record<string, unknown> }
+        | undefined;
+      const templateIds = templates?.templates
+        ? new Set(Object.keys(templates.templates))
+        : new Set<string>();
+      for (const [tIdx, tId] of agentTeams.templates.entries()) {
+        if (typeof tId === "string" && !templateIds.has(tId)) {
+          issues.push({
+            path: `agents.list.${index}.agentTeams.templates.${tIdx}`,
+            message: `references unknown team template "${tId}".`,
+          });
+        }
+      }
+    }
+
+    // Non-fatal: warn if manager has templates but no hierarchy folders
+    // (hierarchy folders are auto-created on spawn, so this is informational only)
+    // Note: we don't block validation here since scaffolding is automatic
+  }
+
+  // Check for circular reportsTo chains
+  for (const entry of agents) {
+    const visited = new Set<string>();
+    let current: string | undefined = normalizeAgentId(entry.id);
+    while (current) {
+      if (visited.has(current)) {
+        issues.push({
+          path: "agents.list",
+          message: `circular reportsTo chain detected involving agent "${entry.id}".`,
+        });
+        break;
+      }
+      visited.add(current);
+      const currentEntry = agents.find(
+        (a) => normalizeAgentId(a.id) === current,
+      );
+      const parent =
+        currentEntry && typeof (currentEntry as Record<string, unknown>).reportsTo === "string"
+          ? normalizeAgentId(
+              (currentEntry as Record<string, unknown>).reportsTo as string,
+            )
+          : undefined;
+      current = parent;
+    }
+  }
+
+  return issues;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

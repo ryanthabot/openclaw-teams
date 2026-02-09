@@ -13,6 +13,8 @@ export { resolveAgentIdFromSessionKey } from "../routing/session-key.js";
 
 type AgentEntry = NonNullable<NonNullable<OpenClawConfig["agents"]>["list"]>[number];
 
+import type { AgentTier } from "../config/types.teams.js";
+
 type ResolvedAgentConfig = {
   name?: string;
   workspace?: string;
@@ -27,6 +29,9 @@ type ResolvedAgentConfig = {
   subagents?: AgentEntry["subagents"];
   sandbox?: AgentEntry["sandbox"];
   tools?: AgentEntry["tools"];
+  tier?: AgentTier;
+  reportsTo?: string;
+  agentTeams?: { enabled?: boolean; templates?: string[] };
 };
 
 let defaultAgentWarned = false;
@@ -121,6 +126,18 @@ export function resolveAgentConfig(
     subagents: typeof entry.subagents === "object" && entry.subagents ? entry.subagents : undefined,
     sandbox: entry.sandbox,
     tools: entry.tools,
+    tier: (entry as Record<string, unknown>).tier as AgentTier | undefined,
+    reportsTo: typeof (entry as Record<string, unknown>).reportsTo === "string"
+      ? ((entry as Record<string, unknown>).reportsTo as string)
+      : undefined,
+    agentTeams:
+      typeof (entry as Record<string, unknown>).agentTeams === "object" &&
+      (entry as Record<string, unknown>).agentTeams
+        ? ((entry as Record<string, unknown>).agentTeams as {
+            enabled?: boolean;
+            templates?: string[];
+          })
+        : undefined,
   };
 }
 
@@ -189,4 +206,177 @@ export function resolveAgentDir(cfg: OpenClawConfig, agentId: string) {
   }
   const root = resolveStateDir(process.env);
   return path.join(root, "agents", id, "agent");
+}
+
+// ---------------------------------------------------------------------------
+// Team hierarchy helpers
+// ---------------------------------------------------------------------------
+
+const TIER_ORDER: AgentTier[] = [
+  "general-manager",
+  "operations",
+  "manager",
+  "team-lead",
+  "teammate",
+];
+
+/** Returns the agent's tier or undefined if not set. */
+export function resolveAgentTier(
+  cfg: OpenClawConfig,
+  agentId: string,
+): AgentTier | undefined {
+  return resolveAgentConfig(cfg, agentId)?.tier;
+}
+
+/** Returns the parent agent ID this agent reports to. */
+export function resolveAgentReportsTo(
+  cfg: OpenClawConfig,
+  agentId: string,
+): string | undefined {
+  return resolveAgentConfig(cfg, agentId)?.reportsTo;
+}
+
+/** Returns all agent IDs that report to the given manager. */
+export function listDirectReports(
+  cfg: OpenClawConfig,
+  managerId: string,
+): string[] {
+  const id = normalizeAgentId(managerId);
+  return listAgentIds(cfg).filter((agentId) => {
+    const reportsTo = resolveAgentConfig(cfg, agentId)?.reportsTo;
+    return reportsTo ? normalizeAgentId(reportsTo) === id : false;
+  });
+}
+
+/**
+ * Returns whether requesterTier can spawn agents at targetTier.
+ * Rules:
+ * - general-manager can spawn operations or manager
+ * - manager can spawn team-lead
+ * - team-lead can spawn teammate
+ * - operations cannot spawn anyone
+ * - teammate cannot spawn anyone
+ */
+export function canSpawnTier(
+  requesterTier: AgentTier | undefined,
+  targetTier: AgentTier | undefined,
+): boolean {
+  if (!requesterTier || !targetTier) {
+    return true; // no tier set = no hierarchy enforcement
+  }
+  const requesterIdx = TIER_ORDER.indexOf(requesterTier);
+  const targetIdx = TIER_ORDER.indexOf(targetTier);
+  if (requesterIdx < 0 || targetIdx < 0) {
+    return true;
+  }
+  // operations tier has no spawning authority
+  if (requesterTier === "operations") {
+    return false;
+  }
+  // teammate tier has no spawning authority
+  if (requesterTier === "teammate") {
+    return false;
+  }
+  // general-manager can spawn operations or manager (tier indices 1 and 2)
+  if (requesterTier === "general-manager") {
+    return targetTier === "operations" || targetTier === "manager";
+  }
+  // manager can spawn team-lead
+  if (requesterTier === "manager") {
+    return targetTier === "team-lead";
+  }
+  // team-lead can spawn teammate
+  if (requesterTier === "team-lead") {
+    return targetTier === "teammate";
+  }
+  return false;
+}
+
+/** Returns agent team templates enabled for a given manager agent. */
+export function resolveAgentTeamTemplates(
+  cfg: OpenClawConfig,
+  agentId: string,
+): string[] {
+  const config = resolveAgentConfig(cfg, agentId);
+  if (!config?.agentTeams?.enabled) {
+    return [];
+  }
+  return config.agentTeams.templates ?? [];
+}
+
+// ---------------------------------------------------------------------------
+// Nested hierarchy filesystem discovery
+// ---------------------------------------------------------------------------
+
+import fs from "node:fs";
+
+/**
+ * List team lead roles available under a manager's hierarchy folder.
+ * Scans workspace/agents/<managerId>/teamleads/ for subdirectories.
+ * Returns empty array if the directory doesn't exist.
+ */
+export function listManagerTeamLeads(
+  workspaceDir: string,
+  managerId: string,
+): string[] {
+  const teamleadsDir = path.join(workspaceDir, "agents", managerId, "teamleads");
+  try {
+    const entries = fs.readdirSync(teamleadsDir, { withFileTypes: true });
+    return entries.filter((e) => e.isDirectory()).map((e) => e.name);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * List teammate roles available under a team lead's hierarchy folder.
+ * Scans workspace/agents/<managerId>/teamleads/<leadRole>/teammates/ for subdirectories.
+ * Returns empty array if the directory doesn't exist.
+ */
+export function listTeamLeadTeammates(
+  workspaceDir: string,
+  managerId: string,
+  leadRole: string,
+): string[] {
+  const teammatesDir = path.join(
+    workspaceDir,
+    "agents",
+    managerId,
+    "teamleads",
+    leadRole,
+    "teammates",
+  );
+  try {
+    const entries = fs.readdirSync(teammatesDir, { withFileTypes: true });
+    return entries.filter((e) => e.isDirectory()).map((e) => e.name);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Check if a specific nested hierarchy path exists on the filesystem.
+ * Used for containment checks before spawning.
+ */
+export function hierarchyPathExists(
+  workspaceDir: string,
+  managerId: string,
+  leadRole?: string,
+  mateRole?: string,
+): boolean {
+  let target = path.join(workspaceDir, "agents", managerId);
+  if (leadRole) {
+    target = path.join(target, "teamleads", leadRole);
+  }
+  if (mateRole) {
+    if (!leadRole) {
+      return false;
+    }
+    target = path.join(target, "teammates", mateRole);
+  }
+  try {
+    return fs.statSync(target).isDirectory();
+  } catch {
+    return false;
+  }
 }

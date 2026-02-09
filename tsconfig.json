@@ -6,7 +6,7 @@
     "esModuleInterop": true,
     "experimentalDecorators": true,
     "forceConsistentCasingInFileNames": true,
-    "lib": ["DOM", "DOM.Iterable", "ES2023", "ScriptHost"],
+    "lib": ["DOM", "DOM.Iterable", "ES2022"],
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
     "noEmit": true,
@@ -15,9 +15,9 @@
     "resolveJsonModule": true,
     "skipLibCheck": true,
     "strict": true,
-    "target": "es2023",
+    "target": "es2022",
     "useDefineForClassFields": false
   },
-  "include": ["src/**/*", "ui/**/*"],
+  "include": ["src/**/*"],
   "exclude": ["node_modules", "dist", "src/**/*.test.ts"]
 }
