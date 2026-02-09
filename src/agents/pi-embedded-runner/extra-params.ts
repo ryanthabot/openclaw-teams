@@ -28,7 +28,8 @@ export function resolveExtraParams(params: {
 type CacheRetention = "none" | "short" | "long";
 type CacheRetentionStreamOptions = Partial<SimpleStreamOptions> & {
   cacheRetention?: CacheRetention;
-};
+  topP?: number;
+} & Record<string, unknown>;
 
 /**
  * Resolve cacheRetention from extraParams, supporting both new `cacheRetention`
