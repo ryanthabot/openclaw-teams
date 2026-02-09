@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(grep:*)",
+      "Bash(npm run type-check:*)",
+      "Bash(npx tsc:*)",
+      "Bash(pnpm tsgo:*)",
+      "Bash(ls:*)",
+      "Bash(node_modules/.bin/tsc:*)",
+      "Bash(node -e:*)",
+      "Bash(node node_modules/typescript/bin/tsc:*)",
+      "Bash(npx vitest run:*)",
+      "Bash(node:*)",
+      "Bash(find:*)",
+      "Bash(npx tsgo:*)",
+      "Bash(pnpm exec tsc:*)",
+      "Bash(\"C:\\\\Users\\\\ourde\\\\OneDrive\\\\Desktop\\\\Openclaw-with-teams\\\\openclaw-original\\\\node_modules\\\\.bin\\\\tsc\" --version)"
+    ]
+  }
+}

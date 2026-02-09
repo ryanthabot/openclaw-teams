@@ -26,6 +26,9 @@ export type AgentSummary = {
   routes?: string[];
   providers?: string[];
   isDefault: boolean;
+  tier?: string;
+  reportsTo?: string;
+  teamTemplates?: string[];
 };
 
 type AgentEntry = NonNullable<NonNullable<OpenClawConfig["agents"]>["list"]>[number];
@@ -114,6 +117,20 @@ export function buildAgentSummaries(cfg: OpenClawConfig): AgentSummary[] {
       : configIdentity && (identityName || identityEmoji)
         ? "config"
         : undefined;
+    const entry = configuredAgents.find(
+      (agent) => normalizeAgentId(agent.id) === id,
+    );
+    const raw = entry as Record<string, unknown> | undefined;
+    const tier = typeof raw?.tier === "string" ? raw.tier : undefined;
+    const reportsTo = typeof raw?.reportsTo === "string" ? raw.reportsTo : undefined;
+    const agentTeams = raw?.agentTeams as
+      | { enabled?: boolean; templates?: string[] }
+      | undefined;
+    const teamTemplates =
+      agentTeams?.enabled && Array.isArray(agentTeams.templates)
+        ? agentTeams.templates
+        : undefined;
+
     return {
       id,
       name: resolveAgentName(cfg, id),
@@ -125,6 +142,9 @@ export function buildAgentSummaries(cfg: OpenClawConfig): AgentSummary[] {
       model: resolveAgentModel(cfg, id),
       bindings: bindingCounts.get(id) ?? 0,
       isDefault: id === defaultAgentId,
+      tier,
+      reportsTo,
+      teamTemplates,
     };
   });
 }

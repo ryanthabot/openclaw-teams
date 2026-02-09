@@ -51,3 +51,36 @@ export const AudioSchema = z
   })
   .strict()
   .optional();
+
+export const TeamMemberSchema = z
+  .object({
+    role: z.string(),
+    name: z.string().optional(),
+    model: z.string().optional(),
+    persona: z.string().optional(),
+  })
+  .strict();
+
+export const TeamTemplateSchema = z
+  .object({
+    teamName: z.string(),
+    teamLead: TeamMemberSchema,
+    teammates: z.array(TeamMemberSchema),
+    hooks: z.record(z.string(), z.string()).optional(),
+    defaults: z
+      .object({
+        taskClaiming: z.enum(["self-claim", "assigned"]).optional(),
+        displayMode: z.string().optional(),
+        requirePlanApproval: z.boolean().optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict();
+
+export const TeamsSchema = z
+  .object({
+    templates: z.record(z.string(), TeamTemplateSchema).optional(),
+  })
+  .strict()
+  .optional();

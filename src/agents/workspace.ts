@@ -5,6 +5,7 @@ import { runCommandWithTimeout } from "../process/exec.js";
 import { isSubagentSessionKey } from "../routing/session-key.js";
 import { resolveUserPath } from "../utils.js";
 import { resolveWorkspaceTemplateDir } from "./workspace-templates.js";
+import type { OpenClawConfig } from "../config/config.js";
 
 export function resolveDefaultAgentWorkspaceDir(
   env: NodeJS.ProcessEnv = process.env,
@@ -27,6 +28,9 @@ export const DEFAULT_HEARTBEAT_FILENAME = "HEARTBEAT.md";
 export const DEFAULT_BOOTSTRAP_FILENAME = "BOOTSTRAP.md";
 export const DEFAULT_MEMORY_FILENAME = "MEMORY.md";
 export const DEFAULT_MEMORY_ALT_FILENAME = "memory.md";
+export const DEFAULT_MANAGER_FILENAME = "MANAGER.md";
+export const DEFAULT_TEAM_LEAD_FILENAME = "TEAM-LEAD.md";
+export const DEFAULT_TEAMMATE_FILENAME = "TEAMMATE.md";
 
 function stripFrontMatter(content: string): string {
   if (!content.startsWith("---")) {
@@ -64,7 +68,10 @@ export type WorkspaceBootstrapFileName =
   | typeof DEFAULT_HEARTBEAT_FILENAME
   | typeof DEFAULT_BOOTSTRAP_FILENAME
   | typeof DEFAULT_MEMORY_FILENAME
-  | typeof DEFAULT_MEMORY_ALT_FILENAME;
+  | typeof DEFAULT_MEMORY_ALT_FILENAME
+  | typeof DEFAULT_MANAGER_FILENAME
+  | typeof DEFAULT_TEAM_LEAD_FILENAME
+  | typeof DEFAULT_TEAMMATE_FILENAME;
 
 export type WorkspaceBootstrapFile = {
   name: WorkspaceBootstrapFileName;
@@ -125,6 +132,7 @@ async function ensureGitRepo(dir: string, isBrandNewWorkspace: boolean) {
 export async function ensureAgentWorkspace(params?: {
   dir?: string;
   ensureBootstrapFiles?: boolean;
+  config?: OpenClawConfig;
 }): Promise<{
   dir: string;
   agentsPath?: string;
@@ -184,6 +192,38 @@ export async function ensureAgentWorkspace(params?: {
     await writeFileIfMissing(bootstrapPath, bootstrapTemplate);
   }
   await ensureGitRepo(dir, isBrandNewWorkspace);
+
+  // If teams are configured, scaffold per-manager hierarchy directories
+  const hasTeams = !!(params?.config as Record<string, unknown>)?.teams;
+  if (hasTeams) {
+    try {
+      const { ensureManagerHierarchyStructure } = await import("../teams/team-bootstrap.js");
+      const cfg = params?.config;
+      const agents = cfg?.agents?.list ?? [];
+      const teams = (cfg as Record<string, unknown> | undefined)?.teams as
+        | { templates?: Record<string, unknown> }
+        | undefined;
+      if (teams?.templates) {
+        for (const agent of agents) {
+          const raw = agent as Record<string, unknown>;
+          const agentTeams = raw.agentTeams as { enabled?: boolean; templates?: string[] } | undefined;
+          if (raw.tier === "manager" && agentTeams?.enabled && agentTeams.templates) {
+            const assigned: Record<string, unknown> = {};
+            for (const tId of agentTeams.templates) {
+              if ((teams.templates as Record<string, unknown>)[tId]) {
+                assigned[tId] = (teams.templates as Record<string, unknown>)[tId];
+              }
+            }
+            if (Object.keys(assigned).length > 0) {
+              await ensureManagerHierarchyStructure(dir, agent.id, assigned as Record<string, import("../config/types.teams.js").TeamTemplate>);
+            }
+          }
+        }
+      }
+    } catch {
+      // Non-fatal: team workspace is supplementary
+    }
+  }
 
   return {
     dir,
@@ -292,12 +332,28 @@ export async function loadWorkspaceBootstrapFiles(dir: string): Promise<Workspac
 
 const SUBAGENT_BOOTSTRAP_ALLOWLIST = new Set([DEFAULT_AGENTS_FILENAME, DEFAULT_TOOLS_FILENAME]);
 
+/** Team subagents get additional tier-specific files. */
+const TEAM_SUBAGENT_BOOTSTRAP_ALLOWLIST = new Set([
+  DEFAULT_AGENTS_FILENAME,
+  DEFAULT_TOOLS_FILENAME,
+  DEFAULT_SOUL_FILENAME,
+  DEFAULT_IDENTITY_FILENAME,
+  DEFAULT_HEARTBEAT_FILENAME,
+  DEFAULT_MANAGER_FILENAME,
+  DEFAULT_TEAM_LEAD_FILENAME,
+  DEFAULT_TEAMMATE_FILENAME,
+]);
+
 export function filterBootstrapFilesForSession(
   files: WorkspaceBootstrapFile[],
   sessionKey?: string,
+  opts?: { isTeamAgent?: boolean },
 ): WorkspaceBootstrapFile[] {
   if (!sessionKey || !isSubagentSessionKey(sessionKey)) {
     return files;
   }
-  return files.filter((file) => SUBAGENT_BOOTSTRAP_ALLOWLIST.has(file.name));
+  const allowlist = opts?.isTeamAgent
+    ? TEAM_SUBAGENT_BOOTSTRAP_ALLOWLIST
+    : SUBAGENT_BOOTSTRAP_ALLOWLIST;
+  return files.filter((file) => allowlist.has(file.name));
 }

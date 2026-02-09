@@ -294,11 +294,122 @@ export function buildSubagentSystemPrompt(params: {
   childSessionKey: string;
   label?: string;
   task?: string;
+  /** Team agent context for tier-specific role framing. */
+  teamContext?: {
+    tier: string;
+    projectId?: string;
+    teamName?: string;
+    role?: string;
+    memberName?: string;
+    managerId?: string;
+    leadRole?: string;
+  };
 }) {
   const taskText =
     typeof params.task === "string" && params.task.trim()
       ? params.task.replace(/\s+/g, " ").trim()
       : "{{TASK_DESCRIPTION}}";
+
+  // For team agents, build a team-specific system prompt
+  if (params.teamContext) {
+    const tc = params.teamContext;
+    const lines = [
+      `# ${tc.tier === "team-lead" ? "Team Lead" : tc.tier === "teammate" ? "Teammate" : tc.tier === "manager" ? "Manager" : "Agent"} Context`,
+      "",
+      `You are a **${tc.tier}** agent within a team hierarchy.`,
+      "",
+      "## Your Identity",
+      tc.role ? `- **Role:** ${tc.role}` : undefined,
+      tc.memberName ? `- **Name:** ${tc.memberName}` : undefined,
+      tc.projectId ? `- **Project:** ${tc.projectId}` : undefined,
+      tc.teamName ? `- **Team:** ${tc.teamName}` : undefined,
+      `- **Tier:** ${tc.tier}`,
+      tc.managerId ? `- **Manager:** ${tc.managerId}` : undefined,
+      tc.leadRole ? `- **Team Lead:** ${tc.leadRole}` : undefined,
+      "",
+      "## Your Assignment",
+      `- You were spawned to handle: ${taskText}`,
+      "",
+    ];
+
+    // Add hierarchy containment info
+    if (tc.managerId) {
+      lines.push("## Hierarchy Containment");
+      if (tc.tier === "manager") {
+        lines.push(
+          `Your team leads are contained in: workspace/agents/${tc.managerId}/teamleads/`,
+          "When spawning team leads, pass teamManagerId and teamLeadRole so they resolve bootstrap files from the correct hierarchy path.",
+          `Always include teamManagerId="${tc.managerId}" when spawning team leads.`,
+          `Always include requesterTeamTier="manager" when spawning so the system knows you are allowed to spawn from a subagent session.`,
+        );
+      } else if (tc.tier === "team-lead" && tc.leadRole) {
+        lines.push(
+          `Your teammates are contained in: workspace/agents/${tc.managerId}/teamleads/${tc.leadRole}/teammates/`,
+          "When spawning teammates, pass teamManagerId, teamLeadRole, and teamRole so they resolve bootstrap files from the correct hierarchy path.",
+          `Always include teamManagerId="${tc.managerId}" and teamLeadRole="${tc.leadRole}" when spawning teammates.`,
+          `Always include requesterTeamTier="team-lead" when spawning so the system knows you are allowed to spawn from a subagent session.`,
+        );
+      } else if (tc.tier === "teammate") {
+        lines.push("You cannot spawn any agents.");
+      }
+      lines.push("");
+    }
+
+    // Add memory scope instructions per tier
+    lines.push("## Memory Scope", "");
+    if (tc.tier === "general-manager" || tc.tier === "operations") {
+      lines.push(
+        "- **Write** workspace memory using your agent workspace `MEMORY.md`.",
+        "- **Read** all project and team memory using `team_memory_read`.",
+        "- To read project memory: `team_memory_read({ projectId, memoryTier: \"project\" })`",
+        "- To read team memory: `team_memory_read({ projectId, memoryTier: \"team\", teamName })`",
+        "",
+      );
+    } else if (tc.tier === "manager") {
+      lines.push(
+        "- **Write** project memory: `team_memory_write({ projectId, memoryTier: \"project\", content, target: \"daily\" })`",
+        "- **Write** curated project notes: `team_memory_write({ projectId, memoryTier: \"project\", content, target: \"curated\" })`",
+        "- **Read** team memory: `team_memory_read({ projectId, memoryTier: \"team\", teamName })`",
+        "- **Cannot** write to workspace memory directly. Send key findings to the GM via `team_message_send`.",
+        "",
+      );
+    } else if (tc.tier === "team-lead") {
+      lines.push(
+        "- **Write** team memory: `team_memory_write({ projectId, memoryTier: \"team\", teamName, content })`",
+        "- **Read** project memory: `team_memory_read({ projectId, memoryTier: \"project\" })`",
+        "- **Cannot** write to project or workspace memory directly.",
+        "",
+      );
+    } else if (tc.tier === "teammate") {
+      lines.push(
+        "- **Write** team memory: `team_memory_write({ projectId, memoryTier: \"team\", teamName, content })`",
+        "- **Read** project memory: `team_memory_read({ projectId, memoryTier: \"project\" })`",
+        "- **Cannot** write to project or workspace memory.",
+        "",
+      );
+    }
+
+    lines.push(
+      "## Workspace Scope",
+      tc.projectId
+        ? `You are scoped to project "${tc.projectId}". All file operations must stay within the project workspace and shared directories. Do not access files outside your project scope.`
+        : "Operate only within your assigned workspace.",
+      "",
+      "## Session Context",
+      params.label ? `- Label: ${params.label}` : undefined,
+      params.requesterSessionKey
+        ? `- Requester session: ${params.requesterSessionKey}.`
+        : undefined,
+      params.requesterOrigin?.channel
+        ? `- Requester channel: ${params.requesterOrigin.channel}.`
+        : undefined,
+      `- Your session: ${params.childSessionKey}.`,
+      "",
+    );
+    return lines.filter((line): line is string => line !== undefined).join("\n");
+  }
+
+  // Standard subagent prompt (non-team)
   const lines = [
     "# Subagent Context",
     "",

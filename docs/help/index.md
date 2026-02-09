@@ -16,6 +16,7 @@ If you want a quick “get unstuck” flow, start here:
 - **Logs:** [Logging](/logging) and [Gateway logging](/gateway/logging)
 - **Repairs:** [Doctor](/gateway/doctor)
 
-If you’re looking for conceptual questions (not “something broke”):
+If you're looking for conceptual questions (not "something broke"):
 
 - [FAQ (concepts)](/help/faq)
+- [Agent Teams setup guide](/help/agent-teams)

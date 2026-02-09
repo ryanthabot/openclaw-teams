@@ -11,12 +11,14 @@ import {
   parseAgentSessionKey,
 } from "../../routing/session-key.js";
 import { normalizeDeliveryContext } from "../../utils/delivery-context.js";
-import { resolveAgentConfig } from "../agent-scope.js";
+import { canSpawnTier, hierarchyPathExists, resolveAgentConfig, resolveAgentTier, resolveAgentWorkspaceDir } from "../agent-scope.js";
 import { AGENT_LANE_SUBAGENT } from "../lanes.js";
 import { optionalStringEnum } from "../schema/typebox.js";
 import { buildSubagentSystemPrompt } from "../subagent-announce.js";
 import { registerSubagentRun } from "../subagent-registry.js";
 import { jsonResult, readStringParam } from "./common.js";
+import type { AgentTier } from "../../config/types.teams.js";
+import { loadTierBootstrapFiles } from "../../teams/team-bootstrap.js";
 import {
   resolveDisplaySessionKey,
   resolveInternalSessionKey,
@@ -33,6 +35,17 @@ const SessionsSpawnToolSchema = Type.Object({
   // Back-compat alias. Prefer runTimeoutSeconds.
   timeoutSeconds: Type.Optional(Type.Number({ minimum: 0 })),
   cleanup: optionalStringEnum(["delete", "keep"] as const),
+  // Team context fields — set when spawning team agents
+  teamTier: Type.Optional(Type.String()),
+  teamProjectId: Type.Optional(Type.String()),
+  teamName: Type.Optional(Type.String()),
+  teamRole: Type.Optional(Type.String()),
+  teamMemberName: Type.Optional(Type.String()),
+  // Nested hierarchy fields — thread through spawn chain for containment
+  teamManagerId: Type.Optional(Type.String()),
+  teamLeadRole: Type.Optional(Type.String()),
+  // The requester's own team tier — passed so subagent sessions can spawn children
+  requesterTeamTier: Type.Optional(Type.String()),
 });
 
 function splitModelRef(ref?: string) {
@@ -120,10 +133,17 @@ export function createSessionsSpawnTool(opts?: {
       const { mainKey, alias } = resolveMainSessionAlias(cfg);
       const requesterSessionKey = opts?.agentSessionKey;
       if (typeof requesterSessionKey === "string" && isSubagentSessionKey(requesterSessionKey)) {
-        return jsonResult({
-          status: "forbidden",
-          error: "sessions_spawn is not allowed from sub-agent sessions",
-        });
+        // Team agents (managers, team leads) are allowed to spawn from subagent sessions
+        // to support the full hierarchy chain (GM -> Manager -> Team Lead -> Teammate).
+        const reqTeamTier = readStringParam(params, "teamTier") as AgentTier | undefined;
+        const requesterTeamTier = readStringParam(params, "requesterTeamTier") as AgentTier | undefined;
+        const effectiveTier = requesterTeamTier || reqTeamTier;
+        if (!effectiveTier || (effectiveTier !== "manager" && effectiveTier !== "team-lead")) {
+          return jsonResult({
+            status: "forbidden",
+            error: "sessions_spawn is not allowed from sub-agent sessions",
+          });
+        }
       }
       const requesterInternalKey = requesterSessionKey
         ? resolveInternalSessionKey({
@@ -164,6 +184,16 @@ export function createSessionsSpawnTool(opts?: {
             error: `agentId is not allowed for sessions_spawn (allowed: ${allowedText})`,
           });
         }
+      }
+
+      // Hierarchy-based spawn enforcement: if both agents have tiers, check permission
+      const requesterTier = resolveAgentTier(cfg, requesterAgentId);
+      const targetTier = resolveAgentTier(cfg, targetAgentId);
+      if (requesterTier && targetTier && !canSpawnTier(requesterTier, targetTier)) {
+        return jsonResult({
+          status: "forbidden",
+          error: `tier "${requesterTier}" cannot spawn tier "${targetTier}" (hierarchy violation)`,
+        });
       }
       const childSessionKey = `agent:${targetAgentId}:subagent:${crypto.randomUUID()}`;
       const spawnedByKey = requesterInternalKey;
@@ -234,13 +264,90 @@ export function createSessionsSpawnTool(opts?: {
           });
         }
       }
-      const childSystemPrompt = buildSubagentSystemPrompt({
+      // Build team context if team parameters are provided
+      const teamTier = readStringParam(params, "teamTier") as AgentTier | undefined;
+      const teamProjectId = readStringParam(params, "teamProjectId");
+      const teamNameParam = readStringParam(params, "teamName");
+      const teamRole = readStringParam(params, "teamRole");
+      const teamMemberName = readStringParam(params, "teamMemberName");
+      const teamManagerId = readStringParam(params, "teamManagerId");
+      const teamLeadRole = readStringParam(params, "teamLeadRole");
+
+      // Containment check: verify spawned role exists in the hierarchy folder
+      if (teamManagerId && teamTier) {
+        const workspaceDir = resolveAgentWorkspaceDir(cfg, requesterAgentId);
+        if (teamTier === "team-lead" && teamRole) {
+          // Manager spawning a team lead: verify the team lead role exists in the manager's folder
+          if (!hierarchyPathExists(workspaceDir, teamManagerId, teamRole)) {
+            return jsonResult({
+              status: "forbidden",
+              error: `team lead role "${teamRole}" not found in hierarchy for manager "${teamManagerId}" (expected: workspace/agents/${teamManagerId}/teamleads/${teamRole}/)`,
+            });
+          }
+        } else if (teamTier === "teammate" && teamLeadRole && teamRole) {
+          // Team lead spawning a teammate: verify the teammate role exists in the lead's folder
+          if (!hierarchyPathExists(workspaceDir, teamManagerId, teamLeadRole, teamRole)) {
+            return jsonResult({
+              status: "forbidden",
+              error: `teammate role "${teamRole}" not found in hierarchy for team lead "${teamLeadRole}" under manager "${teamManagerId}" (expected: workspace/agents/${teamManagerId}/teamleads/${teamLeadRole}/teammates/${teamRole}/)`,
+            });
+          }
+        }
+      }
+
+      const teamContext = teamTier
+        ? {
+            tier: teamTier,
+            projectId: teamProjectId || undefined,
+            teamName: teamNameParam || undefined,
+            role: teamRole || undefined,
+            memberName: teamMemberName || undefined,
+            managerId: teamManagerId || undefined,
+            leadRole: teamLeadRole || undefined,
+          }
+        : undefined;
+
+      let childSystemPrompt = buildSubagentSystemPrompt({
         requesterSessionKey,
         requesterOrigin,
         childSessionKey,
         label: label || undefined,
         task,
+        teamContext,
       });
+
+      // For team agents, load tier-specific bootstrap files and embed them
+      // in the extraSystemPrompt so they flow through the entire agent pipeline.
+      // This ensures MANAGER.md/TEAM-LEAD.md/TEAMMATE.md and tier-specific
+      // SOUL.md/AGENTS.md get injected into the system prompt at run time.
+      if (teamContext) {
+        try {
+          const workspaceDir = resolveAgentWorkspaceDir(cfg, requesterAgentId);
+          const tierFiles = await loadTierBootstrapFiles({
+            workspaceDir,
+            tier: teamContext.tier,
+            projectId: teamContext.projectId,
+            teamName: teamContext.teamName,
+            teamManagerId: teamContext.managerId,
+            teamLeadRole: teamContext.leadRole,
+            teamMateRole: teamContext.role,
+          });
+          const bootstrapSection: string[] = [];
+          for (const file of tierFiles) {
+            if (!file.missing && file.content?.trim()) {
+              bootstrapSection.push(`## ${file.name}`, "", file.content.trim(), "");
+            }
+          }
+          if (bootstrapSection.length > 0) {
+            childSystemPrompt +=
+              "\n\n# Bootstrap Context\n\n" +
+              "The following role-specific bootstrap files define your behavior:\n\n" +
+              bootstrapSection.join("\n");
+          }
+        } catch {
+          // Non-fatal: tier bootstrap files are supplementary
+        }
+      }
 
       const childIdem = crypto.randomUUID();
       let childRunId: string = childIdem;
